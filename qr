@@ -1,0 +1,68 @@
+import cv2
+import json
+import pyzbar
+
+class QRAnalyzer:
+    def __init__(self):
+        self.rules = {}
+        print("QR сканер готов.")
+
+    def scan_qr(self, frame):
+        decoded_objects = pyzbar.decode(frame)
+        
+        results = []
+        for obj in decoded_objects:
+            if obj.type == 'QRCODE':
+                text = obj.data.decode('utf-8')
+                results.append(text)
+        
+        return results
+
+    def parse_rules(self, qr_list):
+        for text in qr_list:
+            try:
+                data = json.loads(text)
+                
+                if "zone" in data:
+                    zone_id = str(data["zone"])
+                    self.rules[zone_id] = data
+                    print(f"Загружено правило для Зоны {zone_id}")
+            except:
+                pass
+
+    def validate_person(self, person, zone):
+        zone = str(zone)
+        
+        if zone not in self.rules:
+            return True, []
+
+        rule = self.rules[zone]
+        violations = []
+
+        if "human_access" in rule:
+            if rule["human_access"] == "forbidden":
+                return False, ["ЗАПРЕТНАЯ ЗОНА"]
+
+        if "helmet_required" in rule:
+            if rule["helmet_required"] == True:
+                if not person["helmet"]:
+                    violations.append("НЕТ КАСКИ")
+
+        if "allowed_clothing_colors" in rule:
+            allowed = rule["allowed_clothing_colors"]
+            if len(allowed) > 0 and "any" not in allowed:
+                my_color = person["clothing_color"]
+                if my_color not in allowed:
+                    violations.append(f"НЕВЕРНЫЙ ЦВЕТ: {my_color}")
+
+        if "allowed_bracelet_colors" in rule:
+            allowed = rule["allowed_bracelet_colors"]
+            if len(allowed) > 0 and "any" not in allowed:
+                my_bracelet = person["bracelet"]
+                if my_bracelet not in allowed:
+                    violations.append(f"НЕВЕРНЫЙ БРАСЛЕТ: {my_bracelet}")
+
+        if len(violations) == 0:
+            return True, []
+        else:
+            return False, violations
