@@ -1,0 +1,78 @@
+import cv2
+import numpy as np
+
+try:
+    from inference import get_model
+    import supervision as sv
+    AI_ENABLED = True
+except:
+    AI_ENABLED = False
+
+class HelmetAnalyzer:
+    def __init__(self):
+        self.model = None
+        if AI_ENABLED:
+            try:
+                print("Загружаем нейросеть для касок...")
+                self.model = get_model(model_id="construction-safety-gsnvb/1")
+            except:
+                print("Не удалось загрузить нейросеть.")
+
+    def get_ppe_detections(self, frame):
+        if self.model:
+            try:
+                result = self.model.infer(frame)[0]
+                return sv.Detections.from_inference(result)
+            except:
+                return None
+        return None
+
+    def match_helmet(self, box, detections):
+        if detections is None:
+            return None
+            
+        x1, y1, x2, y2 = box
+        
+        for i in range(len(detections.xyxy)):
+            dx1, dy1, dx2, dy2 = detections.xyxy[i]
+            
+            if 'class_name' in detections.data:
+                name = detections.data['class_name'][i]
+            else:
+                name = str(detections.class_id[i])
+            
+            if dx1 > x1 - 20 and dx2 < x2 + 20:
+                if dy1 > y1 - 20 and dy2 < y2:
+                    if 'no' in name.lower():
+                        return False
+                    if 'helmet' in name.lower() or 'hardhat' in name.lower():
+                        return True
+        return None
+
+    def analyze_classic(self, img):
+        if img.size == 0:
+            return False
+            
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        
+        h, w = img.shape[:2]
+        head = hsv[0:int(h*0.3), int(w*0.3):int(w*0.7)]
+        
+        if head.size == 0:
+            return False
+            
+        mask1 = cv2.inRange(head, (15, 100, 100), (35, 255, 255))
+        mask2 = cv2.inRange(head, (0, 0, 200), (180, 50, 255))
+        mask3 = cv2.inRange(head, (100, 150, 0), (140, 255, 255))
+        
+        combined = mask1 + mask2 + mask3
+        
+        pixels = cv2.countNonZero(combined)
+        total = head.size / 3
+        
+        ratio = pixels / total
+        
+        if ratio > 0.15:
+            return True
+        else:
+            return False
