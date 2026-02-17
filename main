@@ -1,0 +1,209 @@
+import cv2
+import sys
+import os
+import pandas as pd
+from ultralytics import YOLO
+
+from qr_analyzer import QRAnalyzer
+from clothing import ClothingAnalyzer
+from helmet import HelmetAnalyzer
+from bracelet import BraceletAnalyzer
+
+def main():
+    print("Программа запущена...")
+
+    if len(sys.argv) > 1:
+        video_source = sys.argv[1]
+        print(f"Открываем видео: {video_source}")
+    else:
+        video_source = 0
+        print("Открываем камеру...")
+
+    desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+    output_folder = os.path.join(desktop_path, "Participant_1")
+    
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+        print(f"Создана папка: {output_folder}")
+
+    output_video_path = os.path.join(output_folder, "output_video.avi")
+    output_excel_path = os.path.join(output_folder, "journal.xlsx")
+
+    print("Загрузка моделей...")
+    model = YOLO('yolov8n.pt')
+    
+    clothes_detector = ClothingAnalyzer('tshirt_detection_model.pt')
+    helmet_detector = HelmetAnalyzer()
+    bracelet_detector = BraceletAnalyzer()
+    qr_scanner = QRAnalyzer()
+
+    cap = cv2.VideoCapture(video_source)
+    if not cap.isOpened():
+        print("Ошибка: Не удалось открыть видео!")
+        return
+
+    video_writer = None
+    
+    all_logs = []
+    person_history = {}
+
+    print("Начинаем анализ видео...")
+
+    while True:
+        success, frame = cap.read()
+        if not success:
+            break
+
+        milliseconds = cap.get(cv2.CAP_PROP_POS_MSEC)
+        seconds = milliseconds / 1000.0
+
+        current_zone = "1"
+        if seconds >= 0 and seconds < 15:
+            current_zone = "1"
+        elif seconds >= 15 and seconds < 30:
+            current_zone = "2"
+        elif seconds >= 30 and seconds < 45:
+            current_zone = "3"
+        elif seconds >= 45:
+            current_zone = "4"
+
+        qr_list = qr_scanner.scan_qr(frame)
+        if len(qr_list) > 0:
+            qr_scanner.parse_rules(qr_list)
+
+        results = model.track(frame, persist=True, verbose=False, classes=[0])
+
+        ppe_detections = helmet_detector.get_ppe_detections(frame)
+        hands_detections = bracelet_detector.detect_bracelets(frame)
+
+        if results[0].boxes.id is not None:
+            boxes = results[0].boxes.xyxy.cpu().numpy().astype(int)
+            ids = results[0].boxes.id.cpu().numpy().astype(int)
+
+            for box, person_id in zip(boxes, ids):
+                x1, y1, x2, y2 = box
+                
+                person_img = frame[y1:y2, x1:x2]
+                if person_img.size == 0:
+                    continue
+
+                current_attrs = {}
+
+                color = clothes_detector.analyze_roi(person_img)
+                current_attrs["clothing_color"] = color
+
+                has_helmet = helmet_detector.match_helmet((x1, y1, x2, y2), ppe_detections)
+                if has_helmet is None:
+                    has_helmet = helmet_detector.analyze_classic(person_img)
+                current_attrs["helmet"] = has_helmet
+
+                bracelet_color = "none"
+                if hands_detections:
+                    for hand in hands_detections:
+                        hx, hy = hand["center"]
+                        if x1 < hx < x2 and y1 < hy < y2:
+                            bracelet_color = hand["color"]
+                current_attrs["bracelet"] = bracelet_color
+
+                if person_id not in person_history:
+                    person_history[person_id] = []
+                
+                person_history[person_id].append(current_attrs)
+                if len(person_history[person_id]) > 10:
+                    person_history[person_id].pop(0)
+
+                final_attrs = {}
+                from collections import Counter
+                
+                helmet_list = [p["helmet"] for p in person_history[person_id]]
+                color_list = [p["clothing_color"] for p in person_history[person_id]]
+                bracelet_list = [p["bracelet"] for p in person_history[person_id]]
+
+                final_attrs["helmet"] = Counter(helmet_list).most_common(1)[0][0]
+                final_attrs["clothing_color"] = Counter(color_list).most_common(1)[0][0]
+                final_attrs["bracelet"] = Counter(bracelet_list).most_common(1)[0][0]
+
+                is_valid, violations = qr_scanner.validate_person(final_attrs, current_zone)
+
+                if len(violations) > 0:
+                    log_entry = {
+                        "Zone": current_zone,
+                        "Violations": ", ".join(violations)
+                    }
+                    all_logs.append(log_entry)
+
+                if is_valid:
+                    color_rect = (0, 255, 0)
+                else:
+                    color_rect = (0, 0, 255)
+
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color_rect, 2)
+                
+                text = f"ID:{person_id} Z:{current_zone}"
+                cv2.putText(frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_rect, 2)
+
+                info_text = f"H:{final_attrs['helmet']} C:{final_attrs['clothing_color']} B:{final_attrs['bracelet']}"
+                cv2.putText(frame, info_text, (x1, y2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+
+                y_text = y1 + 20
+                for v in violations:
+                    cv2.putText(frame, v, (x1, y_text), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    y_text += 25
+
+        rules_count = len(qr_scanner.rules)
+        cv2.putText(frame, f"Time: {seconds:.1f}s Zone: {current_zone} Rules: {rules_count}/4", (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+        if video_writer is None:
+            h, w = frame.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            video_writer = cv2.VideoWriter(output_video_path, fourcc, 30.0, (w, h))
+            print(f"Начата запись видео: {output_video_path}")
+        
+        video_writer.write(frame)
+
+        cv2.imshow("Video", frame)
+        
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    print("Сохранение Excel отчета...")
+    
+    excel_rows = []
+    
+    for log in all_logs:
+        violation_text = log["Violations"]
+        violations_list = violation_text.split(", ")
+        
+        for v in violations_list:
+            row = {
+                "название зоны": "Зона " + str(log["Zone"]),
+                "правило": v,
+                "количество": 1
+            }
+            excel_rows.append(row)
+    
+    df = pd.DataFrame(excel_rows, columns=["название зоны", "правило", "количество"])
+    
+    if df.empty:
+        print("Нарушений не было.")
+        df = pd.DataFrame(columns=["название зоны", "правило", "количество"])
+
+    try:
+        with pd.ExcelWriter(output_excel_path) as writer:
+            df.to_excel(writer, sheet_name='Journal', index=False)
+            
+            if not df.empty:
+                stats = df.groupby(["название зоны", "правило"])["количество"].sum().reset_index()
+                stats.to_excel(writer, sheet_name='Statistics', index=False)
+                print("Статистика сохранена.")
+            
+        print(f"Файл сохранен: {output_excel_path}")
+    except Exception as e:
+        print(f"Ошибка при сохранении Excel: {e}")
+
+    cap.release()
+    if video_writer is not None:
+        video_writer.release()
+    cv2.destroyAllWindows()
+    print("Программа завершена.")
