@@ -1,0 +1,48 @@
+import cv2
+import numpy as np
+import mediapipe as mp
+
+class BraceletAnalyzer:
+    def __init__(self):
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(max_num_hands=4)
+
+    def detect_bracelets(self, frame):
+        img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(img_rgb)
+        
+        found_hands = []
+        
+        if results.multi_hand_landmarks:
+            h, w = frame.shape[:2]
+            
+            for hand in results.multi_hand_landmarks:
+                wrist = hand.landmark[0]
+                cx = int(wrist.x * w)
+                cy = int(wrist.y * h)
+                
+                size = 40
+                x1 = max(0, cx - size)
+                y1 = max(0, cy - size)
+                x2 = min(w, cx + size)
+                y2 = min(h, cy + size)
+                
+                crop = frame[y1:y2, x1:x2]
+                
+                if crop.size > 0:
+                    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+                    hue = np.median(hsv[:, :, 0])
+                    
+                    color = "unknown"
+                    if hue < 15 or hue > 165: color = "red"
+                    elif hue < 40: color = "orange"
+                    elif hue < 80: color = "yellow"
+                    elif hue < 130: color = "green"
+                    elif hue < 165: color = "blue"
+                    
+                    found_hands.append({
+                        "center": (cx, cy),
+                        "color": color
+                    })
+                    
+        return found_hands
